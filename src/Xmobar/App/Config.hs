@@ -1,3 +1,6 @@
+{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE BlockArguments #-}
 ------------------------------------------------------------------------------
 -- |
 -- Module: Xmobar.Config.Defaults
@@ -22,6 +25,7 @@ module Xmobar.App.Config (defaultConfig,
 
 import Control.Monad (when, filterM)
 import Data.Functor ((<&>))
+import Data.Maybe (catMaybes, listToMaybe)
 
 import System.Environment
 import System.Directory
@@ -82,40 +86,35 @@ defaultConfig =
 -- necessary.
 xmobarDataDir :: IO String
 xmobarDataDir =
-    findFirstDirWithEnv True "XMOBAR_DATA_DIR"
-      [ getXdgDirectory XdgData "xmobar"
-      , getAppUserDataDirectory "xmobar"
-      ]
+    findFirstDirWithEnv True "XMOBAR_DATA_DIR" =<<
+      sequence
+          [ getXdgDirectory XdgData "xmobar"
+          , getAppUserDataDirectory "xmobar"
+          ]
 
 -- | Helper function that will find the first existing directory and
 -- return its path.  If none of the directories can be found,
 -- optionally create and return the first from the list.  If the list
 -- is empty this function returns the historical @~\/.xmobar@
 -- directory.
-findFirstDirOf :: Bool -> [IO FilePath] -> IO FilePath
-findFirstDirOf create [] = findFirstDirOf create [getAppUserDataDirectory "xmobar"]
-findFirstDirOf create possibles = do
-    found <- go possibles
-    case found of
-      Just path -> return path
-      Nothing ->  do
-        primary <- head possibles
-        when create (createDirectoryIfMissing True primary)
-        return primary
+findFirstDirOf :: Bool -> [FilePath] -> IO FilePath
+findFirstDirOf create [] =
+    findFirstDirOf create =<< sequence [getAppUserDataDirectory "xmobar"]
+findFirstDirOf create possibles =
+    go possibles >>= \case
+        Just path -> pure path
+        Nothing -> do
+            let primary = head possibles
+            primary <$ when create (createDirectoryIfMissing True primary)
   where
-    go [] = return Nothing
-    go (x:xs) = do
-      exists <- x >>= doesDirectoryExist
-      if exists then x <&> Just else go xs
+    go :: [FilePath] -> IO (Maybe FilePath)
+    go = fmap listToMaybe . filterM doesDirectoryExist
 
 -- | Simple wrapper around @findFirstDirOf@ that allows the primary
 -- path to be specified by an environment variable.
-findFirstDirWithEnv :: Bool -> String -> [IO FilePath] -> IO FilePath
-findFirstDirWithEnv create envName paths = do
-    envPath' <- lookupEnv envName
-    case envPath' of
-      Nothing -> findFirstDirOf create paths
-      Just envPath -> findFirstDirOf create (return envPath:paths)
+findFirstDirWithEnv :: Bool -> String -> [FilePath] -> IO FilePath
+findFirstDirWithEnv create envName paths =
+    findFirstDirOf create . maybe paths (:paths) =<< lookupEnv envName
 
 xmobarInConfigDirs :: FilePath -> IO (Maybe FilePath)
 xmobarInConfigDirs fn  = do
@@ -125,13 +124,10 @@ xmobarInConfigDirs fn  = do
     hom <- getHomeDirectory
     let candidates = case env of
                        Nothing -> [app, xdg, hom]
-                       Just p -> [p, app, xdg, hom]
-    fs <- filterM (\d -> fileExist (d </> fn)) candidates
-    return $ if null fs then Nothing else Just (head fs </> fn)
+                       Just p  -> [p, app, xdg, hom]
+    filterM (fileExist . (</> fn)) candidates <&> fmap (</> fn) . listToMaybe
 
 xmobarConfigFile :: IO (Maybe FilePath)
 xmobarConfigFile =
-  fmap ffirst $ mapM xmobarInConfigDirs ["xmobar.hs", ".xmobarrc", "xmobarrc"]
-  where ffirst [] = Nothing
-        ffirst (Nothing:fs) = ffirst fs
-        ffirst (p:_) = p
+    traverse xmobarInConfigDirs ["xmobar.hs", ".xmobarrc", "xmobarrc"]
+        <&> listToMaybe . catMaybes
